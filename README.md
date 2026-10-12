@@ -43,3 +43,15 @@ The repository's \`wrangler.toml\` references the existing \`vorzex\` database I
 ## Privacy
 
 The public feed returns only configs explicitly activated by an administrator. Device reports are sent only after the user confirms the action inside the Device screen. The report contains the displayed 12-digit device code, device model, Android version, and local IPv4 addresses; API registration also stores an opaque high-entropy installation key and app version for authenticated remote commands. The Worker sees ordinary network metadata, including the public source IP, for each request. The app does not send VPN profiles, subscription URLs, private keys, browsing history, or traffic contents. Remote commands are limited to disconnecting the active VPN service and clearing temporary app cache; clearing cache does not remove saved VPN profiles or settings.
+
+
+## Device management and remote controls
+
+- `POST /v1/device/report` — authenticated report submitted only after a user confirms from the Android Device screen. The report contains the displayed device code, model, Android version, and local IPv4 addresses.
+- `GET /v1/admin/devices` — admin-only device list.
+- `POST /v1/admin/commands` — queue a disconnect for one 12-digit device code or all opted-in devices.
+- `POST /v1/admin/cache/clear` — clear known Worker edge-cache keys and queue cleanup of temporary app cache for opted-in devices.
+- `GET /v1/client/commands` and `POST /v1/client/commands/:id/ack` — authenticated command polling and acknowledgement.
+- `GET /v1/client/access-status` — access policy for an opted-in installation.
+
+The Telegram `/panel` includes device listing, disconnect, per-device access block/allow, and cache cleanup. Remote disconnect and cache cleanup are delivered when the app's VPN service is running and can reach the API. Android posts a user-visible notification when a remote disconnect or cache cleanup is applied. The app does not upload VPN profiles, subscription URLs, private keys, browsing history, or traffic payloads. Admin credentials must remain in Worker secrets; never embed them in the APK.
