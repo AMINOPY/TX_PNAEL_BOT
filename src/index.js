@@ -96,7 +96,7 @@ async function tgShowConfigs(env,chatId){
  const r=await env.DB.prepare("SELECT id,name,protocol,is_active FROM published_configs ORDER BY created_at DESC LIMIT 30").all();
  const rows=r.results||[];
  if(!rows.length){await tgSend(env,chatId,"هنوز کانفیگی ثبت نشده است.",tgPanelKeyboard());return}
- const text="📋 فهرست کانفیگ‌ها\\n\\n"+rows.map(c=>(Number(c.is_active)===1?"🟢 فعال":"⚪ غیرفعال")+" · #"+c.id+" · "+String(c.name).slice(0,70)+" · "+c.protocol).join("\\n");
+ const text="📋 فهرست کانفیگ‌ها\n\n"+rows.map(c=>(Number(c.is_active)===1?"🟢 فعال":"⚪ غیرفعال")+" · #"+c.id+" · "+String(c.name).slice(0,70)+" · "+c.protocol).join("\n");
  const keyboard=rows.map(c=>[{text:Number(c.is_active)===1?"غیرفعال‌کردن #"+c.id:"فعال‌کردن #"+c.id,callback_data:"cfg:toggle:"+c.id},{text:"🗑 حذف #"+c.id,callback_data:"cfg:delete:"+c.id}]);
  keyboard.push([{text:"↩️ بازگشت به پنل",callback_data:"panel:home"}]);
  await tgSend(env,chatId,text,{inline_keyboard:keyboard});
@@ -178,7 +178,7 @@ async function tgShowDevices(env,chatId){
  const r=await env.DB.prepare("SELECT i.id,i.app_version,d.device_code,d.device_name,d.android_version,d.reported_at FROM installations i JOIN device_reports d ON d.installation_row_id=i.id ORDER BY d.reported_at DESC LIMIT 12").all();
  const rows=r.results||[];
  if(!rows.length){await tgSend(env,chatId,"هنوز دستگاهی از صفحهٔ «دستگاه» گزارش نفرستاده است.",tgPanelKeyboard());return}
- const text="📱 دستگاه‌های ثبت‌شده\\n\\n"+rows.map(d=>"• "+String(d.device_name).slice(0,45)+" · Android "+d.android_version+" · App "+d.app_version+"\\nشناسه: "+d.device_code+"\\nگزارش: "+d.reported_at).join("\\n\\n");
+ const text="📱 دستگاه‌های ثبت‌شده\n\n"+rows.map(d=>"• "+String(d.device_name).slice(0,45)+" · Android "+d.android_version+" · App "+d.app_version+"\nشناسه: "+d.device_code+"\nگزارش: "+d.reported_at).join("\n\n");
  const keyboard=rows.map(d=>[{text:"⛔ قطع #"+d.device_code,callback_data:"dev:stop:"+d.id},{text:"🚫 مسدود",callback_data:"dev:block:"+d.id},{text:"✅ مجاز",callback_data:"dev:allow:"+d.id}]);
  keyboard.push([{text:"↩️ بازگشت به پنل",callback_data:"panel:home"}]);
  await tgSend(env,chatId,text,{inline_keyboard:keyboard});
