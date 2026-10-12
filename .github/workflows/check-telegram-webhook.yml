@@ -1,0 +1,44 @@
+name: Check Telegram webhook status
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/check-telegram-webhook.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  check-webhook:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Read webhook status without changing it
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          node <<'NODE'
+          const token = process.env.TELEGRAM_BOT_TOKEN;
+          if (!token) {
+            console.error('Missing GitHub Actions secret TELEGRAM_BOT_TOKEN.');
+            process.exit(1);
+          }
+          (async () => {
+            const response = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
+            const data = await response.json();
+            if (!response.ok || !data.ok) {
+              console.error(`getWebhookInfo failed: HTTP ${response.status}; ${data.description || 'Telegram API error'}`);
+              process.exit(1);
+            }
+            const info = data.result;
+            console.log('Webhook URL:', info.url || '(not set)');
+            console.log('Pending updates:', info.pending_update_count ?? 'unknown');
+            console.log('Last error date:', info.last_error_date ? new Date(info.last_error_date * 1000).toISOString() : '(none)');
+            console.log('Last error message:', info.last_error_message || '(none)');
+            console.log('Allowed updates:', JSON.stringify(info.allowed_updates || []));
+          })().catch(() => {
+            console.error('Could not read webhook status. Token values were not printed.');
+            process.exit(1);
+          });
+          NODE
