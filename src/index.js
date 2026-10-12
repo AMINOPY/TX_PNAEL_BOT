@@ -95,7 +95,7 @@ async function recordDeviceReport(env,req,requestId,origin){
  if(typeof b.deviceCode!=="string"||!/^\d{12}$/.test(b.deviceCode)||typeof b.deviceName!=="string"||!b.deviceName.trim()||b.deviceName.length>120||typeof b.androidVersion!=="string"||!b.androidVersion.trim()||b.androidVersion.length>32||typeof (b.localIps??"")!=="string"||(b.localIps||"").length>256)return err(400,"invalid_request","Invalid device report",requestId,origin);
  const now=new Date().toISOString();
  await env.DB.prepare("INSERT INTO device_reports(installation_row_id,device_code,device_name,android_version,local_ips,reported_at) VALUES(?,?,?,?,?,?) ON CONFLICT(installation_row_id) DO UPDATE SET device_code=excluded.device_code,device_name=excluded.device_name,android_version=excluded.android_version,local_ips=excluded.local_ips,reported_at=excluded.reported_at").bind(i.id,b.deviceCode,b.deviceName.trim(),b.androidVersion.trim(),(b.localIps||"").trim(),now).run();
- await audit(env,"device_report_submit","installation",i.id,"installation",i.id,{fields:["deviceCode","deviceName","androidVersion","localIps"]});
+ const publicIp=(req.headers.get("cf-connecting-ip")||"").slice(0,64)||null;await env.DB.prepare("INSERT INTO device_network_observations(installation_row_id,public_ip,last_seen_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(installation_row_id) DO UPDATE SET public_ip=excluded.public_ip,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at").bind(i.id,publicIp,now,now).run();await audit(env,"device_report_submit","installation",i.id,"installation",i.id,{fields:["deviceCode","deviceName","androidVersion","localIps","publicIp"]});
  return out({ok:true,reportedAt:now},200,requestId,origin);
 }
 async function getClientCommands(env,req,requestId,origin){
