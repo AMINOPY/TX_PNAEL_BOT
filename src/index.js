@@ -1,205 +1,54 @@
-const MAX_CONFIG_LENGTH = 12000;
-const ALLOWED_SCHEMES = new Set([
-  "vless:", "vmess:", "trojan:", "ss:", "hysteria2:", "hy2:", "tuic:", "wireguard:", "socks:", "http:"
-]);
+const JSON_HEADERS = {"content-type":"application/json; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff","x-frame-options":"DENY","referrer-policy":"no-referrer","permissions-policy":"camera=(), microphone=(), geolocation=(), payment=()","cross-origin-resource-policy":"same-site","strict-transport-security":"max-age=31536000; includeSubDomains"};
+const MAX_BODY = 16 * 1024;
+const CLIENT_RATE = 60;
+const EVENT_RATE = 120;
+const ADMIN_RATE = 30;
+const REGISTER_RATE = 10;
+const ACCESS_TTL = 15 * 60 * 1000;
+const REFRESH_TTL = 30 * 24 * 60 * 60 * 1000;
+const ALLOWED_EVENTS = new Set(["app_started","vpn_connecting","vpn_connected","vpn_disconnected","heartbeat"]);
+const ALLOWED_PROFILE_SOURCES = new Set(["builtin","remote","local","unknown"]);
 
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=30",
-      "x-content-type-options": "nosniff"
-    }
-  });
+function rid(){return crypto.randomUUID();}
+function out(body,status=200,requestId=rid(),origin=null){const h=new Headers(JSON_HEADERS);h.set("x-request-id",requestId);if(origin&&originAllowed(origin))h.set("access-control-allow-origin",origin);return new Response(JSON.stringify(body),{status,headers:h});}
+function err(status,code,message,requestId,origin){return out({error:code,message,requestId},status,requestId,origin)}
+function originAllowed(o){if(!o)return false;const allowed=(globalThis.__origins||[]);return allowed.includes(o)}
+function cors(req){const o=req.headers.get("origin");return out({ok:true},204,rid(),o)}
+function bearer(req){const h=req.headers.get("authorization")||"";return h.startsWith("Bearer ")?h.slice(7).trim():null}
+function validId(v){return typeof v==="string"&&/^[A-Za-z0-9._:-]{8,128}$/.test(v)}
+function validIso(v){return typeof v==="string"&&Number.isFinite(Date.parse(v))}
+function jsonType(req){const c=(req.headers.get("content-type")||"").toLowerCase();return c.includes("application/json")}
+async function readJson(req,requestId,origin){const len=Number(req.headers.get("content-length")||0);if(len>MAX_BODY)throw [413,"body_too_large","Request body too large"];if(!jsonType(req))throw [415,"unsupported_media_type","Content-Type must be application/json"];const t=await req.text();if(t.length>MAX_BODY)throw [413,"body_too_large","Request body too large"];try{return JSON.parse(t)}catch{throw [400,"invalid_json","Invalid JSON"]}}
+async function sha(v){const b=new TextEncoder().encode(v);const d=await crypto.subtle.digest("SHA-256",b);return [...new Uint8Array(d)].map(x=>x.toString(16).padStart(2,"0")).join("")}
+function rand(n=32){const a=new Uint8Array(n);crypto.getRandomValues(a);return [...a].map(x=>x.toString(16).padStart(2,"0")).join("")}
+async function tokenHash(env,t){return sha(env.TOKEN_PEPPER+":"+t)}
+async function rate(env,bucket,max){const minute=Math.floor(Date.now()/60000);const key=bucket+":"+minute;await env.DB.prepare("INSERT INTO rate_limits(bucket,window_start,request_count) VALUES(?,?,1) ON CONFLICT(bucket) DO UPDATE SET request_count=request_count+1").bind(key,minute).run();const r=await env.DB.prepare("SELECT request_count FROM rate_limits WHERE bucket=?").bind(key).first();if(Math.random()<0.02)env.DB.prepare("DELETE FROM rate_limits WHERE window_start<?").bind(minute-5).run();return Number(r?.request_count||0)<=max}
+async function audit(env,action,actorType,actorId,targetType,targetId,meta={}){await env.DB.prepare("INSERT INTO audit_log(id,actor_type,actor_id,action,target_type,target_id,metadata,created_at) VALUES(?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),actorType,actorId,action,targetType,targetId,JSON.stringify(meta),new Date().toISOString()).run()}
+async function installAuth(env,req){const t=bearer(req);if(!t)return null;const h=await tokenHash(env,t);return await env.DB.prepare("SELECT i.*,u.status AS user_status FROM installations i JOIN users u ON u.id=i.user_id WHERE i.token_hash=? AND i.revoked_at IS NULL AND (i.token_expires_at IS NULL OR i.token_expires_at>?)").bind(h,new Date().toISOString()).first()}
+async function adminAuth(env,req){const panel=req.headers.get("x-admin-token");if(panel&&env.ADMIN_PANEL_TOKEN&&panel===env.ADMIN_PANEL_TOKEN)return {type:"panel",id:"panel"};const bot=req.headers.get("x-telegram-admin-token");const uid=req.headers.get("x-telegram-user-id");const ids=new Set(String(env.TELEGRAM_ADMIN_USER_IDS||"").split(",").map(x=>x.trim()).filter(Boolean));if(bot&&env.TELEGRAM_ADMIN_TOKEN&&bot===env.TELEGRAM_ADMIN_TOKEN&&/^\d+$/.test(uid||"")&&ids.has(uid))return {type:"telegram",id:uid};return null}
+async function policy(env,installation){const now=new Date().toISOString();const ip=await env.DB.prepare("SELECT * FROM access_policies WHERE scope_type='installation' AND scope_id=? AND (expires_at IS NULL OR expires_at>?) ORDER BY updated_at DESC LIMIT 1").bind(installation.id,now).first();if(ip)return ip;const up=await env.DB.prepare("SELECT * FROM access_policies WHERE scope_type='user' AND scope_id=? AND (expires_at IS NULL OR expires_at>?) ORDER BY updated_at DESC LIMIT 1").bind(installation.user_id,now).first();return up||null}
+async function register(env,req,rid0,origin){if(!await rate(env,"register:"+(req.headers.get("cf-connecting-ip")||"unknown"),REGISTER_RATE))return err(429,"rate_limited","Too many registration requests",rid0,origin);const b=await readJson(req,rid0,origin);if(!validId(b.installationId)||typeof b.appVersion!=="string"||b.appVersion.length>32||!validIso(b.consentedAt))return err(400,"invalid_request","Invalid installation payload",rid0,origin);const existing=await env.DB.prepare("SELECT i.*,u.status AS user_status FROM installations i JOIN users u ON u.id=i.user_id WHERE i.installation_id=?").bind(b.installationId).first();let userId=existing?.user_id||crypto.randomUUID();if(!existing)await env.DB.prepare("INSERT INTO users(id,status,created_at,updated_at) VALUES(?,?,?,?)").bind(userId,"active",new Date().toISOString(),new Date().toISOString()).run();const access=rand(32),refresh=rand(48),ah=await tokenHash(env,access),rh=await tokenHash(env,refresh),now=Date.now(),accessExp=new Date(now+ACCESS_TTL).toISOString(),refreshExp=new Date(now+REFRESH_TTL).toISOString();if(existing)await env.DB.prepare("UPDATE installations SET token_hash=?,token_expires_at=?,refresh_token_hash=?,refresh_token_expires_at=?,revoked_at=NULL,app_version=?,updated_at=? WHERE id=?").bind(ah,accessExp,rh,refreshExp,b.appVersion,new Date(now).toISOString(),existing.id).run();else await env.DB.prepare("INSERT INTO installations(id,user_id,installation_id,token_hash,token_expires_at,refresh_token_hash,refresh_token_expires_at,app_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),userId,b.installationId,ah,accessExp,rh,refreshExp,b.appVersion,new Date(now).toISOString(),new Date(now).toISOString()).run();return out({installationId:b.installationId,installationToken:access,refreshToken:refresh,tokenExpiresAt:accessExp,refreshTokenExpiresAt:refreshExp},201,rid0,origin)}
+
+
+function validPublishedConfig(value){if(typeof value!=="string")return false;const v=value.trim();if(!v||v.length>12000||/[\r\n]/.test(v))return false;const colon=v.indexOf(":");if(colon<1)return false;return new Set(["vless:","vmess:","trojan:","ss:","hysteria2:","hy2:","tuic:","wireguard:","socks:","http:"]).has(v.slice(0,colon+1).toLowerCase())}
+function validPublishedMeta(b){return b&&typeof b.name==="string"&&b.name.trim().length>0&&b.name.trim().length<=80&&typeof b.protocol==="string"&&b.protocol.trim().length>0&&b.protocol.trim().length<=24&&validPublishedConfig(b.config)}
+async function tgApi(env,method,payload){if(!env.TELEGRAM_BOT_TOKEN)throw new Error("Telegram bot token is not configured");const r=await fetch("https://api.telegram.org/bot"+env.TELEGRAM_BOT_TOKEN+"/"+method,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)});if(!r.ok)throw new Error("Telegram API HTTP "+r.status);const data=await r.json();if(!data.ok)throw new Error("Telegram API rejected request");return data.result}
+async function tgSend(env,chatId,text,markup){return tgApi(env,"sendMessage",{chat_id:chatId,text,disable_web_page_preview:true,...(markup?{reply_markup:markup}:{})})}
+function tgAdmin(env,id){const ids=String(env.TELEGRAM_ADMIN_IDS||env.TELEGRAM_ADMIN_USER_IDS||"").split(",").map(x=>x.trim()).filter(Boolean);return ids.includes(String(id))}
+function tgPanelKeyboard(){return {inline_keyboard:[[{text:"➕ افزودن کانفیگ",callback_data:"cfg:add"}],[{text:"📋 فهرست کانفیگ‌ها",callback_data:"cfg:list"}]]}}
+async function tgShowConfigs(env,chatId){const r=await env.DB.prepare("SELECT id,name,protocol,is_active FROM published_configs ORDER BY created_at DESC LIMIT 30").all();const rows=r.results||[];if(!rows.length){await tgSend(env,chatId,"هنوز کانفیگی ثبت نشده است.",tgPanelKeyboard());return}for(const c of rows){const active=Number(c.is_active)===1;await tgSend(env,chatId,(active?"🟢 فعال":"⚪ غیرفعال")+"\n#"+c.id+" · "+c.name+" · "+c.protocol,{inline_keyboard:[[{text:active?"غیرفعال‌کردن":"فعال‌کردن",callback_data:"cfg:toggle:"+c.id},{text:"🗑 حذف",callback_data:"cfg:delete:"+c.id}]]})}await tgSend(env,chatId,"مدیریت کانفیگ‌ها",tgPanelKeyboard())}
+async function handleTelegramUpdate(env,update){
+ if(update.callback_query){const q=update.callback_query,uid=q.from?.id,chat=q.message?.chat?.id,data=String(q.data||"");if(!tgAdmin(env,uid)){if(chat)await tgSend(env,chat,"⛔ دسترسی مدیریت برای شما فعال نیست.");return}await tgApi(env,"answerCallbackQuery",{callback_query_id:q.id});if(!chat)return;
+ if(data==="cfg:add"){await env.DB.prepare("INSERT INTO telegram_admin_sessions(telegram_user_id,action,created_at) VALUES(?,'add_config',?) ON CONFLICT(telegram_user_id) DO UPDATE SET action='add_config',created_at=excluded.created_at").bind(String(uid),new Date().toISOString()).run();await tgSend(env,chat,"اطلاعات را در یک خط بفرست:\nنام | پروتکل | لینک کانفیگ\n\nنمونه:\nسرور آزمایشی | VLESS | vless://...\n\nفقط کانفیگ‌هایی را منتشر کن که اجازهٔ اشتراک‌گذاری آن‌ها را داری. برای لغو /cancel را بفرست.");return}
+ if(data==="cfg:list"){await tgShowConfigs(env,chat);return}const toggle=data.match(/^cfg:toggle:(\d+)$/);if(toggle){await env.DB.prepare("UPDATE published_configs SET is_active=CASE WHEN is_active=1 THEN 0 ELSE 1 END,updated_at=? WHERE id=?").bind(new Date().toISOString(),Number(toggle[1])).run();await tgSend(env,chat,"وضعیت کانفیگ به‌روزرسانی شد.",tgPanelKeyboard());return}const del=data.match(/^cfg:delete:(\d+)$/);if(del){await env.DB.prepare("DELETE FROM published_configs WHERE id=?").bind(Number(del[1])).run();await tgSend(env,chat,"کانفیگ حذف شد.",tgPanelKeyboard())}return}
+ const m=update.message,uid=m?.from?.id,chat=m?.chat?.id,text=String(m?.text||"").trim();if(!uid||!chat||!text)return;if(!tgAdmin(env,uid)){if(text==="/panel"||text.startsWith("/panel@"))await tgSend(env,chat,"⛔ دسترسی مدیریت برای شما فعال نیست.");return}
+ if(text==="/start"||text==="/panel"||text.startsWith("/panel@")){await tgSend(env,chat,"پنل مدیریت کانفیگ‌های VØRZEX VPN",tgPanelKeyboard());return}if(text==="/cancel"){await env.DB.prepare("DELETE FROM telegram_admin_sessions WHERE telegram_user_id=?").bind(String(uid)).run();await tgSend(env,chat,"عملیات لغو شد.",tgPanelKeyboard());return}
+ const session=await env.DB.prepare("SELECT action FROM telegram_admin_sessions WHERE telegram_user_id=?").bind(String(uid)).first();if(!session||session.action!=="add_config")return;const parts=text.split("|").map(x=>x.trim());if(parts.length!==3||!validPublishedMeta({name:parts[0],protocol:parts[1],config:parts[2]})){await tgSend(env,chat,"قالب یا لینک معتبر نیست. با قالب «نام | پروتکل | لینک» دوباره بفرست یا /cancel را بزن.");return}
+ await env.DB.prepare("INSERT INTO published_configs(name,protocol,config,is_active,created_by,created_at,updated_at) VALUES(?,?,?,1,?,?,?)").bind(parts[0],parts[1],parts[2],String(uid),new Date().toISOString(),new Date().toISOString()).run();await env.DB.prepare("DELETE FROM telegram_admin_sessions WHERE telegram_user_id=?").bind(String(uid)).run();await tgSend(env,chat,"✅ کانفیگ ثبت شد؛ در بخش «کانفیگ‌های مدیریت VØRZEX» صفحهٔ اصلی برنامه ظاهر می‌شود.",tgPanelKeyboard())
 }
 
-function isAdmin(env, userId) {
-  const allowed = String(env.ADMIN_TELEGRAM_IDS || "")
-    .split(",").map((id) => id.trim()).filter(Boolean);
-  return allowed.includes(String(userId));
-}
-
-function validConfig(value) {
-  if (typeof value !== "string") return false;
-  const config = value.trim();
-  if (!config || config.length > MAX_CONFIG_LENGTH || /[\r\n]/.test(config)) return false;
-  const colon = config.indexOf(":");
-  if (colon < 1) return false;
-  return ALLOWED_SCHEMES.has(config.slice(0, colon + 1).toLowerCase());
-}
-
-async function telegram(env, method, payload) {
-  if (!env.TELEGRAM_BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is not configured");
-  const response = await fetch(
-    "https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/" + method,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload)
-    }
-  );
-  if (!response.ok) throw new Error("Telegram API returned " + response.status);
-  const result = await response.json();
-  if (!result.ok) throw new Error("Telegram API rejected the request");
-  return result.result;
-}
-
-async function sendMessage(env, chatId, text, replyMarkup) {
-  return telegram(env, "sendMessage", {
-    chat_id: chatId,
-    text,
-    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-    disable_web_page_preview: true
-  });
-}
-
-function panelKeyboard() {
-  return {
-    inline_keyboard: [
-      [{ text: "➕ افزودن کانفیگ", callback_data: "cfg:add" }],
-      [{ text: "📋 فهرست کانفیگ‌ها", callback_data: "cfg:list" }]
-    ]
-  };
-}
-
-async function showConfigs(env, chatId) {
-  const { results = [] } = await env.DB.prepare(
-    "SELECT id, name, protocol, is_active FROM configs ORDER BY created_at DESC LIMIT 30"
-  ).all();
-  if (!results.length) {
-    await sendMessage(env, chatId, "هنوز کانفیگی ثبت نشده است.", panelKeyboard());
-    return;
-  }
-  for (const item of results) {
-    const active = Number(item.is_active) === 1;
-    await sendMessage(env, chatId,
-      (active ? "🟢 فعال" : "⚪ غیرفعال") + "\n" +
-      "#" + item.id + " · " + item.name + " · " + item.protocol,
-      {
-        inline_keyboard: [[
-          { text: active ? "غیرفعال‌کردن" : "فعال‌کردن", callback_data: "cfg:toggle:" + item.id },
-          { text: "🗑 حذف", callback_data: "cfg:delete:" + item.id }
-        ]]
-      }
-    );
-  }
-  await sendMessage(env, chatId, "مدیریت کانفیگ‌ها", panelKeyboard());
-}
-
-async function handleCallback(env, callback) {
-  const userId = callback.from?.id;
-  const chatId = callback.message?.chat?.id;
-  const data = String(callback.data || "");
-  if (!isAdmin(env, userId)) {
-    if (chatId) await sendMessage(env, chatId, "⛔ دسترسی مدیریت برای شما فعال نیست.");
-    return;
-  }
-  await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
-  if (!chatId) return;
-
-  if (data === "cfg:add") {
-    await env.DB.prepare(
-      "INSERT INTO admin_sessions (telegram_user_id, action, created_at) VALUES (?, 'add_config', datetime('now')) ON CONFLICT(telegram_user_id) DO UPDATE SET action='add_config', created_at=datetime('now')"
-    ).bind(String(userId)).run();
-    await sendMessage(env, chatId,
-      "اطلاعات را در یک خط بفرست:\nنام | پروتکل | لینک کانفیگ\n\nنمونه:\nسرور آزمایشی | VLESS | vless://...\n\nفقط کانفیگ‌هایی را منتشر کن که اجازهٔ اشتراک‌گذاری آن‌ها را داری. برای لغو /cancel را بفرست."
-    );
-    return;
-  }
-  if (data === "cfg:list") {
-    await showConfigs(env, chatId);
-    return;
-  }
-  const toggleMatch = data.match(/^cfg:toggle:(\d+)$/);
-  if (toggleMatch) {
-    await env.DB.prepare(
-      "UPDATE configs SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END, updated_at = datetime('now') WHERE id = ?"
-    ).bind(Number(toggleMatch[1])).run();
-    await sendMessage(env, chatId, "وضعیت کانفیگ به‌روزرسانی شد.", panelKeyboard());
-    return;
-  }
-  const deleteMatch = data.match(/^cfg:delete:(\d+)$/);
-  if (deleteMatch) {
-    await env.DB.prepare("DELETE FROM configs WHERE id = ?").bind(Number(deleteMatch[1])).run();
-    await sendMessage(env, chatId, "کانفیگ حذف شد.", panelKeyboard());
-  }
-}
-
-async function handleAdminMessage(env, message) {
-  const userId = message.from?.id;
-  const chatId = message.chat?.id;
-  const text = String(message.text || "").trim();
-  if (!chatId || !userId || !text) return;
-  if (!isAdmin(env, userId)) {
-    if (text === "/panel" || text.startsWith("/panel@")) {
-      await sendMessage(env, chatId, "⛔ دسترسی مدیریت برای شما فعال نیست.");
-    }
-    return;
-  }
-  if (text === "/start" || text === "/panel" || text.startsWith("/panel@")) {
-    await sendMessage(env, chatId, "پنل مدیریت کانفیگ‌های VØRZEX VPN", panelKeyboard());
-    return;
-  }
-  if (text === "/cancel") {
-    await env.DB.prepare("DELETE FROM admin_sessions WHERE telegram_user_id = ?").bind(String(userId)).run();
-    await sendMessage(env, chatId, "عملیات لغو شد.", panelKeyboard());
-    return;
-  }
-  const session = await env.DB.prepare(
-    "SELECT action FROM admin_sessions WHERE telegram_user_id = ?"
-  ).bind(String(userId)).first();
-  if (!session || session.action !== "add_config") return;
-
-  const parts = text.split("|").map((part) => part.trim());
-  if (parts.length !== 3 || !parts[0] || !parts[1] || !validConfig(parts[2])) {
-    await sendMessage(env, chatId,
-      "قالب یا لینک معتبر نیست. دوباره با قالب «نام | پروتکل | لینک» بفرست یا /cancel را بزن."
-    );
-    return;
-  }
-  const [name, protocol, config] = parts;
-  if (name.length > 80 || protocol.length > 24) {
-    await sendMessage(env, chatId, "نام حداکثر ۸۰ و پروتکل حداکثر ۲۴ نویسه باشد.");
-    return;
-  }
-  await env.DB.prepare(
-    "INSERT INTO configs (name, protocol, config, is_active, created_by, created_at, updated_at) VALUES (?, ?, ?, 1, ?, datetime('now'), datetime('now'))"
-  ).bind(name, protocol, config, String(userId)).run();
-  await env.DB.prepare("DELETE FROM admin_sessions WHERE telegram_user_id = ?").bind(String(userId)).run();
-  await sendMessage(env, chatId, "✅ کانفیگ ثبت شد و پس از به‌روزرسانی فهرست در صفحهٔ اصلی برنامه نمایش داده می‌شود.", panelKeyboard());
-}
-
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
-      return json({ ok: true, service: "vorzex-config-api", version: "1.0.0" });
-    }
-    if (request.method === "GET" && url.pathname === "/v1/public/configs") {
-      try {
-        const { results = [] } = await env.DB.prepare(
-          "SELECT id, name, protocol, config, updated_at FROM configs WHERE is_active = 1 ORDER BY created_at DESC LIMIT 100"
-        ).all();
-        return json({ ok: true, configs: results });
-      } catch {
-        return json({ ok: false, error: "database_unavailable" }, 503);
-      }
-    }
-    if (request.method === "POST" && url.pathname === "/telegram/webhook") {
-      const expected = String(env.TELEGRAM_WEBHOOK_SECRET || "");
-      const supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
-      if (!expected || supplied !== expected) return json({ ok: false }, 401);
-      try {
-        const update = await request.json();
-        if (update.callback_query) await handleCallback(env, update.callback_query);
-        else if (update.message) await handleAdminMessage(env, update.message);
-        return json({ ok: true }, 200);
-      } catch (error) {
-        console.error("Telegram update processing failed:", error?.message || "unknown");
-        return json({ ok: false }, 500);
-      }
-    }
-    return json({ ok: false, error: "not_found" }, 404);
-  }
-};
+async function handler(req,env){globalThis.__origins=String(env.ALLOWED_ORIGINS||"").split(",").map(x=>x.trim()).filter(Boolean);const origin=req.headers.get("origin");const requestId=rid();try{if(req.method==="OPTIONS")return cors(req);const u=new URL(req.url),p=u.pathname;if((p==="/health"||p==="/healthz")&&req.method==="GET")return out({ok:true,service:"vorzex-api",time:new Date().toISOString()},200,requestId,origin);if(p==="/v1/public/configs"&&req.method==="GET"){const r=await env.DB.prepare("SELECT id,name,protocol,config,updated_at FROM published_configs WHERE is_active=1 ORDER BY created_at DESC LIMIT 100").all();return out({ok:true,configs:r.results||[]},200,requestId,origin)}if(p==="/telegram/webhook"&&req.method==="POST"){const secret=String(env.TELEGRAM_WEBHOOK_SECRET||"");if(!secret||req.headers.get("X-Telegram-Bot-Api-Secret-Token")!==secret)return err(401,"webhook_unauthorized","Invalid webhook secret",requestId,origin);const b=await readJson(req,requestId,origin);await handleTelegramUpdate(env,b);return out({ok:true},200,requestId,origin)}if(p==="/v1/installations/register"&&req.method==="POST")return register(env,req,requestId,origin);if(p.startsWith("/v1/admin/")){if(!await rate(env,"admin:"+(req.headers.get("cf-connecting-ip")||"unknown"),ADMIN_RATE))return err(429,"rate_limited","Too many admin requests",requestId,origin);const a=await adminAuth(env,req);if(!a)return err(401,"admin_unauthorized","Admin authentication required",requestId,origin);if(p==="/v1/admin/configs"&&req.method==="GET"){const r=await env.DB.prepare("SELECT id,name,protocol,config,is_active,created_by,created_at,updated_at FROM published_configs ORDER BY created_at DESC LIMIT 200").all();return out({configs:r.results||[]},200,requestId,origin)}if(p==="/v1/admin/configs"&&req.method==="POST"){const b=await readJson(req,requestId,origin);if(!validPublishedMeta(b))return err(400,"invalid_config","Invalid name, protocol, or config URI",requestId,origin);const now=new Date().toISOString();const r=await env.DB.prepare("INSERT INTO published_configs(name,protocol,config,is_active,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").bind(b.name.trim(),b.protocol.trim(),b.config.trim(),b.isActive===false?0:1,a.id,now,now).run();return out({ok:true,id:r.meta?.last_row_id||null},201,requestId,origin)}const cm=p.match(/^\/v1\/admin\/configs\/(\d+)$/);if(cm&&req.method==="PUT"){const b=await readJson(req,requestId,origin);if(!validPublishedMeta(b))return err(400,"invalid_config","Invalid name, protocol, or config URI",requestId,origin);await env.DB.prepare("UPDATE published_configs SET name=?,protocol=?,config=?,is_active=?,updated_at=? WHERE id=?").bind(b.name.trim(),b.protocol.trim(),b.config.trim(),b.isActive===false?0:1,new Date().toISOString(),Number(cm[1])).run();return out({ok:true},200,requestId,origin)}if(cm&&req.method==="DELETE"){await env.DB.prepare("DELETE FROM published_configs WHERE id=?").bind(Number(cm[1])).run();return out({ok:true},200,requestId,origin)}if(p==="/v1/admin/users"&&req.method==="GET"){const r=await env.DB.prepare("SELECT id,status,created_at,updated_at FROM users ORDER BY created_at DESC LIMIT 200").all();return out({users:r.results||[]},200,requestId,origin)}if(p==="/v1/admin/audit-log"&&req.method==="GET"){const r=await env.DB.prepare("SELECT id,actor_type,actor_id,action,target_type,target_id,metadata,created_at FROM audit_log ORDER BY created_at DESC LIMIT 200").all();return out({auditLog:r.results||[]},200,requestId,origin)}const am=p.match(/^\/v1\/admin\/access\/([^/]+)$/);if(am&&req.method==="GET"){const r=await env.DB.prepare("SELECT * FROM access_policies WHERE scope_id=? ORDER BY updated_at DESC LIMIT 20").bind(am[1]).all();return out({policies:r.results||[]},200,requestId,origin)}if(am&&req.method==="PUT"){const b=await readJson(req,requestId,origin);const scopeType=b.scopeType==="user"?"user":"installation";const allowed=Boolean(b.allowed);const reason=typeof b.reasonCode==="string"?b.reasonCode.slice(0,64):null;const message=typeof b.message==="string"?b.message.slice(0,255):null;const exp=b.expiresAt==null?null:(validIso(b.expiresAt)?b.expiresAt:null);if(b.expiresAt!=null&&!exp)return err(400,"invalid_request","Invalid expiresAt",requestId,origin);await env.DB.prepare("INSERT INTO access_policies(id,scope_type,scope_id,allowed,reason_code,message,expires_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(scope_type,scope_id) DO UPDATE SET allowed=excluded.allowed,reason_code=excluded.reason_code,message=excluded.message,expires_at=excluded.expires_at,updated_at=excluded.updated_at").bind(crypto.randomUUID(),scopeType,am[1],allowed?1:0,reason,message,exp,new Date().toISOString()).run();await audit(env,"access_policy_update",a.type,a.id,scopeType,am[1],{allowed,reasonCode:reason});return out({ok:true},200,requestId,origin)}const rm=p.match(/^\/v1\/admin\/installations\/([^/]+)\/revoke-token$/);if(rm&&req.method==="POST"){await env.DB.prepare("UPDATE installations SET revoked_at=?,updated_at=? WHERE id=?").bind(new Date().toISOString(),new Date().toISOString(),rm[1]).run();await audit(env,"installation_token_revoke",a.type,a.id,"installation",rm[1]);return out({ok:true},200,requestId,origin)}return err(404,"not_found","Not found",requestId,origin)}
+if(p==="/v1/client/access-status"&&req.method==="GET"){const i=await installAuth(env,req);if(!i)return err(401,"invalid_token","Invalid or expired token",requestId,origin);if(i.user_status!=="active")return out({allowed:false,reasonCode:"user_inactive",recheckAfterSeconds:300},200,requestId,origin);if(!await rate(env,"client:"+i.id,CLIENT_RATE))return err(429,"rate_limited","Too many requests",requestId,origin);const pol=await policy(env,i);return out({allowed:pol?Boolean(pol.allowed):false,reasonCode:pol?.reason_code||"no_policy",message:pol?.message||null,recheckAfterSeconds:300},200,requestId,origin)}
+if(p==="/v1/telemetry/events"&&req.method==="POST"){const i=await installAuth(env,req);if(!i)return err(401,"invalid_token","Invalid or expired token",requestId,origin);if(!await rate(env,"event:"+i.id,EVENT_RATE))return err(429,"rate_limited","Too many events",requestId,origin);const b=await readJson(req,requestId,origin);if(!validId(b.eventId)||b.installationId!==i.installation_id||!ALLOWED_EVENTS.has(b.eventType)||!validIso(b.occurredAt)||typeof b.appVersion!=="string"||b.appVersion.length>32)return err(400,"invalid_request","Invalid event payload",requestId,origin);if(b.profileSource!=null&&!ALLOWED_PROFILE_SOURCES.has(b.profileSource))return err(400,"invalid_request","Invalid profileSource",requestId,origin);await env.DB.prepare("INSERT OR IGNORE INTO events(id,installation_id,event_type,occurred_at,app_version,profile_label,profile_source,created_at) VALUES(?,?,?,?,?,?,?,?)").bind(b.eventId,i.id,b.eventType,b.occurredAt,b.appVersion,typeof b.profileLabel==="string"?b.profileLabel.slice(0,128):null,b.profileSource||null,new Date().toISOString()).run();return out({accepted:true,eventId:b.eventId},202,requestId,origin)}
+if(p==="/v1/auth/refresh"&&req.method==="POST"){if(!await rate(env,"refresh:"+(req.headers.get("cf-connecting-ip")||"unknown"),20))return err(429,"rate_limited","Too many refresh requests",requestId,origin);const b=await readJson(req,requestId,origin);if(typeof b.refreshToken!=="string"||b.refreshToken.length<32)return err(400,"invalid_request","Invalid refresh token",requestId,origin);const h=await tokenHash(env,b.refreshToken),now=new Date();const i=await env.DB.prepare("SELECT * FROM installations WHERE refresh_token_hash=? AND revoked_at IS NULL AND refresh_token_expires_at>?").bind(h,now.toISOString()).first();if(!i)return err(401,"invalid_refresh_token","Invalid or expired refresh token",requestId,origin);const access=rand(32),refresh=rand(48),ah=await tokenHash(env,access),rh=await tokenHash(env,refresh),ae=new Date(Date.now()+ACCESS_TTL).toISOString(),re=new Date(Date.now()+REFRESH_TTL).toISOString();await env.DB.prepare("UPDATE installations SET token_hash=?,token_expires_at=?,refresh_token_hash=?,refresh_token_expires_at=?,updated_at=? WHERE id=?").bind(ah,ae,rh,re,new Date().toISOString(),i.id).run();return out({installationToken:access,refreshToken:refresh,tokenExpiresAt:ae,refreshTokenExpiresAt:re},200,requestId,origin)}return err(404,"not_found","Not found",requestId,origin)}catch(e){console.error("request_failed",{requestId,error:String(e)});if(Array.isArray(e)&&e.length===3)return err(e[0],e[1],e[2],requestId,origin);return err(500,"internal_error","Internal server error",requestId,origin)}}
+export default {fetch(req,env){return handler(req,env)}};
