@@ -1,4 +1,13 @@
 -- Additive VØRZEX device-management tables. Existing users/configs/events are untouched.
+CREATE TABLE IF NOT EXISTS installation_keys (
+  installation_id TEXT PRIMARY KEY,
+  api_installation_key TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (installation_id) REFERENCES installations(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_installation_keys_api_key
+  ON installation_keys (api_installation_key);
+
 CREATE TABLE IF NOT EXISTS device_reports (
   installation_row_id TEXT PRIMARY KEY,
   device_code TEXT NOT NULL DEFAULT '',
