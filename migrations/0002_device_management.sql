@@ -14,7 +14,7 @@ CREATE INDEX IF NOT EXISTS idx_device_reports_reported_at
 CREATE TABLE IF NOT EXISTS remote_commands (
   id TEXT PRIMARY KEY,
   installation_row_id TEXT NOT NULL,
-  command_type TEXT NOT NULL CHECK (command_type IN ('disconnect', 'clear_api_cache')),
+  command_type TEXT NOT NULL CHECK (command_type IN ('disconnect', 'clear_cache')),
   message TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'delivered', 'acknowledged', 'failed')),
   created_by TEXT NOT NULL,
