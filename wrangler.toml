@@ -1,0 +1,15 @@
+name = "vorzex-config-api"
+main = "src/index.js"
+compatibility_date = "2026-10-12"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "vorzex-configs"
+database_id = "REPLACE_WITH_REAL_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[vars]
+# Set these as Worker secrets; do not put real values in this file.
+# TELEGRAM_BOT_TOKEN
+# TELEGRAM_WEBHOOK_SECRET
+# ADMIN_TELEGRAM_IDS (comma-separated numeric Telegram user IDs)
