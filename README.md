@@ -42,4 +42,4 @@ The repository's \`wrangler.toml\` references the existing \`vorzex\` database I
 
 ## Privacy
 
-The public feed returns only configs explicitly activated by an administrator. It does not request or store device IDs, app versions, IP addresses, connection history, or VPN traffic. The Android app only fetches the public feed; device details remain local to the Device screen.
+The public feed returns only configs explicitly activated by an administrator. Device reports are sent only after the user confirms the action inside the Device screen. The report contains the displayed 12-digit device code, device model, Android version, and local IPv4 addresses; API registration also stores an opaque high-entropy installation key and app version for authenticated remote commands. The Worker sees ordinary network metadata, including the public source IP, for each request. The app does not send VPN profiles, subscription URLs, private keys, browsing history, or traffic contents. Remote commands are limited to disconnecting the active VPN service and clearing temporary app cache; clearing cache does not remove saved VPN profiles or settings.
