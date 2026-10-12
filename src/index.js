@@ -66,8 +66,23 @@ async function register(env,req,rid0,origin){
 
 function validPublishedConfig(value){if(typeof value!=="string")return false;const v=value.trim();if(!v||v.length>12000||/[\r\n]/.test(v))return false;const colon=v.indexOf(":");if(colon<1)return false;return new Set(["vless:","vmess:","trojan:","ss:","hysteria2:","hy2:","tuic:","wireguard:","socks:","http:"]).has(v.slice(0,colon+1).toLowerCase())}
 function validPublishedMeta(b){if(!b||typeof b.name!=="string"||!b.name.trim()||b.name.trim().length>80||typeof b.protocol!=="string"||!b.protocol.trim()||b.protocol.trim().length>24||!validPublishedConfig(b.config))return false;const scheme=b.config.trim().slice(0,b.config.trim().indexOf(":")).toLowerCase();const p=b.protocol.trim().toLowerCase().replace(/[^a-z0-9]/g,"");const expected={vless:["vless"],vmess:["vmess"],trojan:["trojan"],shadowsocks:["ss"],ss:["ss"],hysteria2:["hysteria2","hy2"],hy2:["hysteria2","hy2"],tuic:["tuic"],wireguard:["wireguard"],socks:["socks"],http:["http"]};return (expected[p]||[]).includes(scheme)}
-async function tgApi(env,method,payload){if(!env.TELEGRAM_BOT_TOKEN)throw new Error("Telegram bot token is not configured");const r=await fetch("https://api.telegram.org/bot"+env.TELEGRAM_BOT_TOKEN+"/"+method,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)});if(!r.ok)throw new Error("Telegram API HTTP "+r.status);const data=await r.json();if(!data.ok)throw new Error("Telegram API rejected request");return data.result}
-async function tgSend(env,chatId,text,markup){return tgApi(env,"sendMessage",{chat_id:chatId,text,disable_web_page_preview:true,...(markup?{reply_markup:markup}:{})})}
+async function tgApi(env,method,payload){if(!env.TELEGRAM_BOT_TOKEN)throw new Error("Telegram bot token is not configured");const r=await fetch("https://api.telegram.org/bot"+env.TELEGRAM_BOT_TOKEN+"/"+method,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)});if(!r.ok)throw new Error("Telegram API HTTP "+r.status);const data=await r.json();if(!data.ok)throw new Error(data.description||"Telegram API rejected request");return data.result}
+async function tgSend(env,chatId,text,markup){
+ await env.DB.prepare("CREATE TABLE IF NOT EXISTS telegram_ui_messages (chat_id TEXT PRIMARY KEY, message_id INTEGER NOT NULL, updated_at TEXT NOT NULL)").run();
+ const old=await env.DB.prepare("SELECT message_id FROM telegram_ui_messages WHERE chat_id=?").bind(String(chatId)).first();
+ if(old?.message_id){
+  try{
+   const edited=await tgEdit(env,chatId,old.message_id,text,markup);
+   await env.DB.prepare("UPDATE telegram_ui_messages SET updated_at=? WHERE chat_id=?").bind(new Date().toISOString(),String(chatId)).run();
+   return edited;
+  }catch(error){
+   if(String(error?.message||error).toLowerCase().includes("message is not modified"))return {message_id:old.message_id};
+  }
+ }
+ const sent=await tgApi(env,"sendMessage",{chat_id:chatId,text,disable_web_page_preview:true,...(markup?{reply_markup:markup}:{})});
+ await env.DB.prepare("INSERT INTO telegram_ui_messages(chat_id,message_id,updated_at) VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET message_id=excluded.message_id,updated_at=excluded.updated_at").bind(String(chatId),Number(sent.message_id),new Date().toISOString()).run();
+ return sent;
+}
 function tgOwner(env,id){const owner=String(env.TELEGRAM_OWNER_ID||"").trim();const fallback=String(env.TELEGRAM_ADMIN_IDS||"").split(",").map(x=>x.trim()).filter(Boolean);return /^\d+$/.test(String(id||""))&&(owner?String(id)===owner:(fallback.length===1&&String(id)===fallback[0]))}
 async function ensureOwnerSessions(env){await env.DB.prepare("CREATE TABLE IF NOT EXISTS telegram_owner_sessions (telegram_user_id TEXT PRIMARY KEY, stage TEXT NOT NULL, input TEXT NOT NULL DEFAULT '', expires_at TEXT NOT NULL, updated_at TEXT NOT NULL, prompt_message_id INTEGER)").run();const cols=await env.DB.prepare("PRAGMA table_info(telegram_owner_sessions)").all();if(!(cols.results||[]).some(c=>c.name==="prompt_message_id"))await env.DB.prepare("ALTER TABLE telegram_owner_sessions ADD COLUMN prompt_message_id INTEGER").run()}
 async function ownerSession(env,id){await ensureOwnerSessions(env);return env.DB.prepare("SELECT stage,input,expires_at,prompt_message_id FROM telegram_owner_sessions WHERE telegram_user_id=? AND expires_at>?").bind(String(id),new Date().toISOString()).first()}
@@ -76,7 +91,16 @@ async function tgEdit(env,chat,messageId,text,markup){return tgApi(env,"editMess
 async function ownerPrompt(env,chat,stage,input="",messageId=null,prefix=""){const text=prefix+(stage==="tag"?"راهنمایی: تگ معروف مالک چیست؟":"🔐 "+(stage==="pin1"?"رمز اول":"رمز دوم")+" را وارد کن\nرمز: "+("•".repeat(String(input).length)));const markup=stage==="tag"?{inline_keyboard:[[{text:"↩️ لغو ورود",callback_data:"owner:cancel"}]]}:ownerPinKeyboard(input);return messageId?tgEdit(env,chat,messageId,text,markup):tgSend(env,chat,text,markup)}
 async function tgRunDiagnostics(env,chat,actor){const checks=[];for(const [label,sql] of [["پایگاه داده","SELECT 1 AS ok"],["کاربران","SELECT COUNT(*) AS n FROM users"],["دستگاه‌ها","SELECT COUNT(*) AS n FROM device_reports"],["رویدادها","SELECT COUNT(*) AS n FROM events"],["فرمان‌ها","SELECT COUNT(*) AS n FROM remote_commands"],["سیاست‌های دسترسی","SELECT COUNT(*) AS n FROM access_policies"],["کانفیگ‌ها","SELECT COUNT(*) AS n FROM published_configs"]]){try{const r=await env.DB.prepare(sql).first();checks.push("✅ "+label+(r&&r.n!==undefined?": "+r.n:""))}catch(e){checks.push("❌ "+label+": "+String(e?.message||e).slice(0,120))}}let api="نامشخص";try{const r=await fetch("https://tx-pnael-bot.aminghm-939.workers.dev/health");api=r.ok?"سالم (HTTP "+r.status+")":"خطا (HTTP "+r.status+")"}catch(e){api="در دسترس نیست: "+String(e?.message||e).slice(0,80)}checks.unshift("🌐 API: "+api);await audit(env,"diagnostics_run","telegram",String(actor),"system","worker",{checks:checks.length});await tgSend(env,chat,"🔧 گزارش عیب‌یابی VØRZEX VPN\n\n"+checks.join("\n")+"\n\nℹ️ خطاهای داخل گوشی فقط در صورت ارسال گزارش از خود برنامه قابل مشاهده‌اند.",{inline_keyboard:[[{text:"🛠 رفع موارد امن",callback_data:"diag:fix"}],[{text:"↩️ بازگشت",callback_data:"panel:home"}]]})}
 function tgPanelKeyboard(){return {inline_keyboard:[[{text:"➕ افزودن کانفیگ",callback_data:"cfg:add"},{text:"📋 فهرست کانفیگ‌ها",callback_data:"cfg:list"}],[{text:"🔎 جست‌وجوی کاربر با شناسه",callback_data:"user:search"}],[{text:"📱 دستگاه‌ها و نسخه‌ها",callback_data:"dev:list"},{text:"📊 آمار",callback_data:"stats:show"}],[{text:"🧾 رویدادهای اتصال",callback_data:"events:recent"}],[{text:"🔧 عیب‌یابی",callback_data:"diag:run"}],[{text:"🚦 سیاست دسترسی",callback_data:"access:help"}],[{text:"⛔ قطع VPN همهٔ دستگاه‌ها",callback_data:"dev:stopall"}],[{text:"🧹 پاک‌سازی کش API",callback_data:"cache:clear"}]]}}
-async function tgShowConfigs(env,chatId){const r=await env.DB.prepare("SELECT id,name,protocol,is_active FROM published_configs ORDER BY created_at DESC LIMIT 30").all();const rows=r.results||[];if(!rows.length){await tgSend(env,chatId,"هنوز کانفیگی ثبت نشده است.",tgPanelKeyboard());return}for(const c of rows){const active=Number(c.is_active)===1;await tgSend(env,chatId,(active?"🟢 فعال":"⚪ غیرفعال")+"\n#"+c.id+" · "+c.name+" · "+c.protocol,{inline_keyboard:[[{text:active?"غیرفعال‌کردن":"فعال‌کردن",callback_data:"cfg:toggle:"+c.id},{text:"🗑 حذف",callback_data:"cfg:delete:"+c.id}]]})}await tgSend(env,chatId,"مدیریت کانفیگ‌ها",tgPanelKeyboard())}
+async function tgShowConfigs(env,chatId){
+ const r=await env.DB.prepare("SELECT id,name,protocol,is_active FROM published_configs ORDER BY created_at DESC LIMIT 30").all();
+ const rows=r.results||[];
+ if(!rows.length){await tgSend(env,chatId,"هنوز کانفیگی ثبت نشده است.",tgPanelKeyboard());return}
+ const text="📋 فهرست کانفیگ‌ها\\n\\n"+rows.map(c=>(Number(c.is_active)===1?"🟢 فعال":"⚪ غیرفعال")+" · #"+c.id+" · "+String(c.name).slice(0,70)+" · "+c.protocol).join("\\n");
+ const keyboard=rows.map(c=>[{text:Number(c.is_active)===1?"غیرفعال‌کردن #"+c.id:"فعال‌کردن #"+c.id,callback_data:"cfg:toggle:"+c.id},{text:"🗑 حذف #"+c.id,callback_data:"cfg:delete:"+c.id}]);
+ keyboard.push([{text:"↩️ بازگشت به پنل",callback_data:"panel:home"}]);
+ await tgSend(env,chatId,text,{inline_keyboard:keyboard});
+}
+
 async function handleTelegramUpdate(env,update){
  if(update.callback_query){const q=update.callback_query,uid=q.from?.id,chat=q.message?.chat?.id,data=String(q.data||"");if(!tgOwner(env,uid)){if(chat)await tgSend(env,chat,"⚠️ این پنل برای شما نیست؛ لطفاً بار دیگر درخواست نکنید.");return}await tgApi(env,"answerCallbackQuery",{callback_query_id:q.id});if(!chat)return;
  await ensureOwnerSessions(env);
@@ -150,12 +174,15 @@ async function tgShowStats(env,chatId){
  await tgSend(env,chatId,"📊 آمار VØRZEX\nکانفیگ‌ها: "+(configs?.total||0)+"\nفعال: "+(configs?.active||0)+"\nدستگاه‌های گزارش‌شده: "+(devices?.total||0)+"\nحساب‌های ثبت‌شده: "+(users?.total||0)+"\nفرمان‌های در صف: "+(pending?.total||0)+"\nسیاست‌های مسدودکننده: "+(blocked?.total||0),tgPanelKeyboard());
 }
 async function tgShowDevices(env,chatId){
- const r=await env.DB.prepare("SELECT i.id,i.app_version,d.device_code,d.device_name,d.android_version,d.reported_at FROM installations i JOIN device_reports d ON d.installation_row_id=i.id ORDER BY d.reported_at DESC LIMIT 20").all();
+ const r=await env.DB.prepare("SELECT i.id,i.app_version,d.device_code,d.device_name,d.android_version,d.reported_at FROM installations i JOIN device_reports d ON d.installation_row_id=i.id ORDER BY d.reported_at DESC LIMIT 12").all();
  const rows=r.results||[];
  if(!rows.length){await tgSend(env,chatId,"هنوز دستگاهی از صفحهٔ «دستگاه» گزارش نفرستاده است.",tgPanelKeyboard());return}
- for(const d of rows){await tgSend(env,chatId,"📱 "+d.device_name+"\nAndroid: "+d.android_version+" · App: "+d.app_version+"\nشناسهٔ دستگاه: "+d.device_code+"\nآخرین گزارش: "+d.reported_at,{inline_keyboard:[[{text:"⛔ قطع اتصال",callback_data:"dev:stop:"+d.id}],[{text:"🚫 مسدودسازی",callback_data:"dev:block:"+d.id},{text:"✅ اجازه دسترسی",callback_data:"dev:allow:"+d.id}]]})}
- await tgSend(env,chatId,"مدیریت دستگاه‌ها",tgPanelKeyboard());
+ const text="📱 دستگاه‌های ثبت‌شده\\n\\n"+rows.map(d=>"• "+String(d.device_name).slice(0,45)+" · Android "+d.android_version+" · App "+d.app_version+"\\nشناسه: "+d.device_code+"\\nگزارش: "+d.reported_at).join("\\n\\n");
+ const keyboard=rows.map(d=>[{text:"⛔ قطع #"+d.device_code,callback_data:"dev:stop:"+d.id},{text:"🚫 مسدود",callback_data:"dev:block:"+d.id},{text:"✅ مجاز",callback_data:"dev:allow:"+d.id}]);
+ keyboard.push([{text:"↩️ بازگشت به پنل",callback_data:"panel:home"}]);
+ await tgSend(env,chatId,text,{inline_keyboard:keyboard});
 }
+
 async function telegramClearApiCache(env,chatId,actorId){
  const result=await clearApiCache(null);
  const devices=await env.DB.prepare("SELECT i.id FROM installations i JOIN device_reports d ON d.installation_row_id=i.id JOIN users u ON u.id=i.user_id WHERE 1=1").all();
