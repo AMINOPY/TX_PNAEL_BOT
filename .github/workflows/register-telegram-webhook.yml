@@ -1,0 +1,68 @@
+name: Register Telegram webhook
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/register-telegram-webhook.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  register-webhook:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Register and verify Telegram webhook
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+        run: |
+          node <<'NODE'
+          const token = process.env.TELEGRAM_BOT_TOKEN;
+          const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+          const url = 'https://tx-pnael-bot.aminghm-939.workers.dev/telegram/webhook';
+          if (!token || !secret) {
+            console.error('Required GitHub Actions secrets are missing: TELEGRAM_BOT_TOKEN and/or TELEGRAM_WEBHOOK_SECRET. Secret values are never printed.');
+            process.exit(1);
+          }
+          if (!/^[A-Za-z0-9_-]{1,256}$/.test(secret)) {
+            console.error('TELEGRAM_WEBHOOK_SECRET contains characters Telegram does not accept. Update the Worker and GitHub secret to the same URL-safe random value.');
+            process.exit(1);
+          }
+          async function telegram(method, payload) {
+            const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(payload || {})
+            });
+            const data = await res.json();
+            if (!res.ok || !data.ok) {
+              console.error(`${method} failed: HTTP ${res.status}; ${data.description || 'Telegram API error'}`);
+              process.exit(1);
+            }
+            return data.result;
+          }
+          (async () => {
+            await telegram('setWebhook', {
+              url,
+              secret_token: secret,
+              allowed_updates: ['message', 'callback_query'],
+              drop_pending_updates: false
+            });
+            const info = await telegram('getWebhookInfo');
+            if (info.url !== url) {
+              console.error('Webhook verification failed: Telegram returned a different URL.');
+              process.exit(1);
+            }
+            console.log('Webhook registered and verified.');
+            console.log('URL:', info.url);
+            console.log('Pending updates:', info.pending_update_count ?? 'unknown');
+            if (info.last_error_message) console.log('Telegram last error:', info.last_error_message);
+          })().catch(() => {
+            console.error('Webhook setup failed unexpectedly. Token and secret values were not printed.');
+            process.exit(1);
+          });
+          NODE
