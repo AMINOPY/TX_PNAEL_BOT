@@ -42,7 +42,7 @@ The repository's \`wrangler.toml\` references the existing \`vorzex\` database I
 
 ## Privacy
 
-The public feed returns only configs explicitly activated by an administrator. Device reports are sent only after the user confirms the action inside the Device screen. The report contains the displayed 12-digit device code, device model, Android version, and local IPv4 addresses; API registration also stores an opaque high-entropy installation key and app version for authenticated remote commands. The Worker sees ordinary network metadata, including the public source IP, for each request. The app does not send VPN profiles, subscription URLs, private keys, browsing history, or traffic contents. Remote commands are limited to disconnecting the active VPN service and clearing temporary app cache; clearing cache does not remove saved VPN profiles or settings.
+The public feed returns only configs explicitly activated by an administrator. Device reports are sent only after the user confirms the action inside the Device screen. The report contains the displayed 12-digit device code, device model, Android version, and local IPv4 addresses; API registration also stores an opaque high-entropy installation key and app version for authenticated remote commands. The Worker receives ordinary network metadata, including the public source IP, for each request, but connection events and public-IP observations are persisted only after an installation has submitted its device report following the in-app consent step. The app does not send VPN profiles, subscription URLs, private keys, browsing history, or traffic contents. Remote commands are limited to disconnecting the active VPN service and clearing temporary app cache; clearing cache does not remove saved VPN profiles or settings.
 
 
 ## Device management and remote controls
@@ -55,3 +55,19 @@ The public feed returns only configs explicitly activated by an administrator. D
 - `GET /v1/client/access-status` — access policy for an opted-in installation.
 
 The Telegram `/panel` includes device listing, disconnect, per-device access block/allow, and cache cleanup. Remote disconnect and cache cleanup are delivered when the app's VPN service is running and can reach the API. Android posts a user-visible notification when a remote disconnect or cache cleanup is applied. The app does not upload VPN profiles, subscription URLs, private keys, browsing history, or traffic payloads. Admin credentials must remain in Worker secrets; never embed them in the APK.
+
+## Telegram device administration additions
+
+The `feature/telegram-device-admin` branch adds the following additive behavior:
+
+- Search an existing user UUID, installation UUID, or the existing 12-digit device code. Identifiers are lookup keys and are never rewritten.
+- For devices that explicitly submitted the in-app device report, show device model, Android version, app version, access policy, last recorded VPN connection event, approximate online/VPN state, and the public source IP observed on the most recent consented device report.
+- Device listing includes the recorded public IP when available.
+- The Telegram panel includes read-only API/D1 diagnostics and a safe maintenance action that only clears targeted Worker edge-cache keys. It does not delete D1 records, saved VPN profiles, or settings.
+- Migration `0002_device_network_observations.sql` creates a new table only. It does not alter or delete existing rows.
+
+### Telemetry limits and consent
+
+Device details and the public IP are displayed only for installations that have opted in and submitted a device report. The public IP is the source IP observed by Cloudflare for that request; it may change and is not GPS location. VPN status and last connection time are approximate and depend on the app successfully reporting `vpn_connected`, `vpn_disconnected`, or heartbeat events. An offline device cannot receive a queued remote command until it reconnects to the API. Blocking access takes effect when the client next checks its access policy; an already-running tunnel can only be disconnected when the app's running service receives and applies the remote command. Telegram notifications and Android system notifications depend on the app implementation and OS notification permissions.
+
+The safe-maintenance button is intentionally conservative: it does not pretend to repair arbitrary source-code defects or modify production infrastructure automatically. Use the diagnostic output and runtime logs to identify a specific repair before changing code or database structure.

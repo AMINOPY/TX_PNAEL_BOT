@@ -1,0 +1,15 @@
+name: Validate Worker
+on:
+  pull_request:
+  push:
+    branches: [main, feature/telegram-device-admin]
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check Worker JavaScript syntax
+        run: node --check src/index.js
