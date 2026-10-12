@@ -87,7 +87,7 @@ async function tgShowDevices(env,chatId){
  const r=await env.DB.prepare("SELECT i.id,i.app_version,d.device_code,d.device_name,d.android_version,d.reported_at FROM installations i JOIN device_reports d ON d.installation_row_id=i.id ORDER BY d.reported_at DESC LIMIT 20").all();
  const rows=r.results||[];
  if(!rows.length){await tgSend(env,chatId,"هنوز دستگاهی از صفحهٔ «دستگاه» گزارش نفرستاده است.",tgPanelKeyboard());return}
- for(const d of rows){await tgSend(env,chatId,"📱 "+d.device_name+"\nAndroid: "+d.android_version+" · App: "+d.app_version+"\nشناسه: "+d.installation_id+"\nآخرین گزارش: "+d.reported_at,{inline_keyboard:[[{text:"⛔ قطع اتصال این دستگاه",callback_data:"dev:stop:"+d.id}]]})}
+ for(const d of rows){await tgSend(env,chatId,"📱 "+d.device_name+"\nAndroid: "+d.android_version+" · App: "+d.app_version+"\nشناسهٔ دستگاه: "+d.device_code+"\nآخرین گزارش: "+d.reported_at,{inline_keyboard:[[{text:"⛔ قطع اتصال این دستگاه",callback_data:"dev:stop:"+d.id}]]})}
  await tgSend(env,chatId,"مدیریت دستگاه‌ها",tgPanelKeyboard());
 }
 async function telegramClearApiCache(env,chatId,actorId){
