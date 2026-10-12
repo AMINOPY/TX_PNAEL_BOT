@@ -1,6 +1,7 @@
 -- Additive VØRZEX device-management tables. Existing users/configs/events are untouched.
 CREATE TABLE IF NOT EXISTS device_reports (
   installation_row_id TEXT PRIMARY KEY,
+  device_code TEXT NOT NULL DEFAULT '',
   device_name TEXT NOT NULL,
   android_version TEXT NOT NULL,
   local_ips TEXT NOT NULL DEFAULT '',
