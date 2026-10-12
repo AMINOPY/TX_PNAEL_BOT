@@ -1,15 +1,15 @@
 name = "tx-pnael-bot"
 main = "src/index.js"
-compatibility_date = "2026-10-12"
+compatibility_date = "2026-10-01"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "vorzex-configs"
-database_id = "REPLACE_WITH_REAL_D1_DATABASE_ID"
+database_name = "vorzex"
+database_id = "6bace883-8165-4e7a-95b0-ec41a67708fb"
 migrations_dir = "migrations"
 
-[vars]
-# Set these as Worker secrets; do not put real values in this file.
+# Existing Worker secrets are managed in Cloudflare and are not stored in Git.
+# For Telegram webhook panel, configure these as Worker secrets:
 # TELEGRAM_BOT_TOKEN
 # TELEGRAM_WEBHOOK_SECRET
-# ADMIN_TELEGRAM_IDS (comma-separated numeric Telegram user IDs)
+# TELEGRAM_ADMIN_IDS (comma-separated numeric Telegram user IDs)
