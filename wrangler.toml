@@ -1,4 +1,4 @@
-name = "vorzex-config-api"
+name = "tx-pnael-bot"
 main = "src/index.js"
 compatibility_date = "2026-10-12"
 
