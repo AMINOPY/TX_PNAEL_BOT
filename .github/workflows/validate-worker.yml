@@ -2,7 +2,7 @@ name: Validate Worker
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, feature/telegram-device-admin]
 jobs:
   syntax:
     runs-on: ubuntu-latest
